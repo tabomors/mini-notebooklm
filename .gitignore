@@ -9,3 +9,5 @@ summaries/
 
 # OS
 .DS_Store
+
+.env

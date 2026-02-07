@@ -1,6 +1,6 @@
 ---
 name: local-video-transcript
-description: Transcribe local audio/video files to plain text and SRT using faster-whisper; use when asked to extract transcripts from local media files or to automate local transcription workflows.
+description: Transcribe local audio/video files to plain text and SRT using a local Whisper model by default, with optional OpenAI API support.
 ---
 
 # Local Video Transcript
@@ -16,27 +16,28 @@ description: Transcribe local audio/video files to plain text and SRT using fast
 - Create a virtual environment in the workspace and install dependencies from `requirements.txt`.
 - Run `scripts/transcribe_video.py` with the local file path.
 - Output is written as `.txt` and `.srt` in the chosen output directory (default: `transcriptions/`).
+- Uses a local Whisper model by default; OpenAI API is optional.
 
 Example:
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 .venv/bin/pip install -r skills/local-video-transcript/requirements.txt
 .venv/bin/python skills/local-video-transcript/scripts/transcribe_video.py \
-  "path/to/video.mp4" --language ru --model small --vad-filter
+  "path/to/video.mp4" --language ru --backend local --model small --vad-filter
 ```
 
 ## Options and defaults
 
-- `--model`: `tiny`, `base`, `small`, `medium`, `large-v3` (default: `small`)
+- `--model`: `small` for local or `whisper-1` for OpenAI API (default depends on backend)
+- `--backend`: `local` or `openai` (default: `local`)
 - `--language`: use a language code like `ru` or `en` (default: auto)
-- `--device`: `cpu` or `cuda` (default: `cpu`)
-- `--compute-type`: `int8`, `int8_float16`, `float16` (default: `int8`)
 - `--output-dir`: directory for outputs (default: `transcriptions/`)
 - `--output-base`: base filename for outputs (default: input stem)
-- `--vad-filter`: enable VAD filtering (default: off)
+- `--vad-filter`: no effect with OpenAI API (kept for compatibility)
+- `--no-extract-wav`: skip WAV extraction step (default: extraction on if input is not `.wav`)
 
 ## Notes
 
-- Prefer `small` or `medium` for better accuracy if runtime allows.
-- If the user wants higher accuracy, suggest `--model medium` or `--model large-v3`.
+- OpenAI Whisper API has a 25 MB file limit; compress/split long files if needed.
+- WAV extraction requires `ffmpeg` and is used to ensure audio-only input.
