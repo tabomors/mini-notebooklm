@@ -13,7 +13,7 @@ Turn a whole YouTube channel into one self-contained knowledge-base directory:
 channels/@handle/
   videos.json      index + per-video processing status (the resume point)
   transcripts/     one cleaned "[HH:MM:SS] text" .txt per video
-  summaries/       one .md summary per video (template of skills/video-transcript-summary/SKILL.md)
+  summaries/       one .md summary per video (template of .claude/skills/video-transcript-summary/SKILL.md)
   comments/        one plain-text comment-threads .txt per video (fetch-comments)
   analysis.md      cross-video analysis: inter-video narrative + thematic chains + standalone videos
   analysis/        batch digests, only for channels too large to analyze in one pass
@@ -24,13 +24,13 @@ Never write channel outputs into the top-level `transcriptions/`, `summaries/` o
 ## Use this skill when
 
 - The user gives a channel URL (`https://www.youtube.com/@name`), an `@handle`, or asks to process/analyze "a channel".
-- For a single video, use `skills/video-transcript-summary-pipeline/SKILL.md` instead.
+- For a single video, use `.claude/skills/video-transcript-summary-pipeline/SKILL.md` instead.
 
 ## Environment
 
-- Helper script: `.venv/bin/python skills/youtube-channel-analyzer/scripts/channel_index.py <subcommand> ...` (run from the repo root).
+- Helper script: `.venv/bin/python .claude/skills/youtube-channel-analyzer/scripts/channel_index.py <subcommand> ...` (run from the repo root).
 - If `.venv` does not exist yet, create it once: `uv venv .venv`. `channel_index.py` is stdlib-only — no `pip install`, no `requirements.txt`.
-- yt-dlp always runs through `uvx` (fresh extractor), matching `skills/youtube-auto-subs/SKILL.md`.
+- yt-dlp always runs through `uvx` (fresh extractor), matching `.claude/skills/youtube-auto-subs/SKILL.md`.
 - If a proxy is configured (e.g. `YTDLP_PROXY=http://user:pass@gw.dataimpulse.com:823` in `.env`), `channel_index.py index` picks it up automatically; add `--proxy "$YTDLP_PROXY"` to the yt-dlp download commands too.
 
 ## Phase 0 — Resolve the input
@@ -47,7 +47,7 @@ uvx yt-dlp --skip-download --print "%(channel_url)s" VIDEO_URL
 1. Build the index (cheap, flat playlist, seconds):
 
 ```
-.venv/bin/python skills/youtube-channel-analyzer/scripts/channel_index.py index --channel "@handle"
+.venv/bin/python .claude/skills/youtube-channel-analyzer/scripts/channel_index.py index --channel "@handle"
 ```
 
 Re-running `index` later is safe: it merges by id and preserves all processing status. Useful flags: `--tab videos,shorts,streams` (default `videos`), `--limit N`, `--sleep-requests S`, `--yt-dlp "..."` override.
@@ -102,7 +102,7 @@ Inside, junk comments are filtered out by a `claude -p --model haiku` call, so t
 ... channel_index.py mark --channel "@handle" --id VIDEO_ID --comments done --file "comments/<exact printed stem>.txt"
 ```
 
-4. Write the summary **via a subagent** (dispatch one subagent per video, several in parallel — downloads stay sequential, summaries don't need to be). The subagent's task: read `skills/video-transcript-summary/SKILL.md` and follow its template exactly (language = transcript language, `AD` / `Needs verification` flags, chronological chunking for long transcripts), read the transcript file, take title/link from `videos.json`, write the result to `channels/@handle/summaries/<exact stem>.md` — plain text only, no `#`, `*`, or code fences. When `channels/@handle/comments/<exact stem>.txt` exists, pass its path to the subagent too — it feeds the template's Discussion in comments section. The subagent returns only a short confirmation plus 3–8 short topic labels in the channel language; it must not paste the whole summary into its reply. Running summaries in subagents keeps the main context small and processes videos concurrently.
+4. Write the summary **via a subagent** (dispatch one subagent per video, several in parallel — downloads stay sequential, summaries don't need to be). The subagent's task: read `.claude/skills/video-transcript-summary/SKILL.md` and follow its template exactly (language = transcript language, `AD` / `Needs verification` flags, chronological chunking for long transcripts), read the transcript file, take title/link from `videos.json`, write the result to `channels/@handle/summaries/<exact stem>.md` — plain text only, no `#`, `*`, or code fences. When `channels/@handle/comments/<exact stem>.txt` exists, pass its path to the subagent too — it feeds the template's Discussion in comments section. The subagent returns only a short confirmation plus 3–8 short topic labels in the channel language; it must not paste the whole summary into its reply. Running summaries in subagents keeps the main context small and processes videos concurrently.
 5. Immediately update the manifest yourself — one `mark` per video, never batched (this is what makes interrupting safe). Keep `mark` calls in the main agent: the manifest is a single JSON file with atomic writes, and concurrent writers would race:
 
 ```
@@ -131,7 +131,7 @@ Subtitle downloads are the most rate-limited part of YouTube. In practice, thoug
 
 1. **Backoff and retry.** HTTP 429 on subtitles is a temporary IP-level throttle. Wait (2–5 min, longer on repeat), re-run with `--sleep-requests 3..5`. In a normal channel loop the summarization minutes between downloads usually prevent throttling — avoid burst-retrying.
 2. **Proxy with a sticky session.** With `YTDLP_PROXY` set, add `--proxy "$YTDLP_PROXY"` to yt-dlp commands. Per-request IP rotation (default on rotating gateways) looks like session hijacking to YouTube and triggers bot-checks; pin one exit per download instead — for DataImpulse append a session id to the username (`...__sessid.<n>` before the `@`), so one video = one IP and the next video gets a fresh one. Add `--impersonate chrome` and use the `yt-dlp[default,curl-cffi]` build. Note: proxies do not fix 429s caused by requesting translated subtitle tracks — fix that with `--sub-langs` (step 1 above).
-3. **Local Whisper** (video has no subtitle track at all, and the user explicitly wants it): follow `skills/local-video-transcript/SKILL.md` on the downloaded audio. Accurate timecodes, but slow on CPU — use `--model small` only for single videos, not for whole channels.
+3. **Local Whisper** (video has no subtitle track at all, and the user explicitly wants it): follow `.claude/skills/local-video-transcript/SKILL.md` on the downloaded audio. Accurate timecodes, but slow on CPU — use `--model small` only for single videos, not for whole channels.
 
 The transcript file in all cases is the same `[HH:MM:SS] text` format, so the summary step does not change.
 
@@ -141,7 +141,7 @@ When every selected video has `summary: done` (check `status`), build `channels/
 
 - Read all summaries in chronological order, plus `topics` from `videos.json` for orientation. Open a transcript only to verify a suspected link between videos — summaries are enough in almost all cases.
 - If the selection has roughly ≤20 videos, write `analysis.md` in one pass. For larger selections, process chronologically in batches of ~15–20, writing a compact digest per batch to `channels/@handle/analysis/batch-NN.md` (skip batch files that already exist — this makes analysis resumable too), then merge the digests into `analysis.md`.
-- Language: the channel's language. Formatting: the same strict plain-text rules as `skills/video-transcript-summary/SKILL.md` (no `#`, `*`, code fences). Reference videos as `Title [id] (date)` instead of timecodes.
+- Language: the channel's language. Formatting: the same strict plain-text rules as `.claude/skills/video-transcript-summary/SKILL.md` (no `#`, `*`, code fences). Reference videos as `Title [id] (date)` instead of timecodes.
 
 Structure of `analysis.md`:
 
@@ -189,7 +189,7 @@ When the user asks about a channel that already has a `channels/@handle/` direct
 ## Edge cases and rules
 
 - Empty `/videos` tab: try `--tab shorts` / `--tab streams` before declaring the channel empty. Live streams live under `/streams`, not `/videos`.
-- No auto-subs for a video: only a manual fallback helps (download the video, transcribe via `skills/local-video-transcript/SKILL.md`) — and only if the user explicitly asks; it is slow. Otherwise mark `failed` with reason "no subtitles".
+- No auto-subs for a video: only a manual fallback helps (download the video, transcribe via `.claude/skills/local-video-transcript/SKILL.md`) — and only if the user explicitly asks; it is slow. Otherwise mark `failed` with reason "no subtitles".
 - Wrong-language subtitle track: re-run the download with `--sub-langs <lang>`.
 - Large channels (>200 videos): warn the user that processing takes hours of summarization and YouTube may throttle; offer `--sleep-requests` on `index` and a `--newest N` start.
 - Never produce the summary or the analysis in Markdown syntax, even though files end in `.md`.

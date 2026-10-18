@@ -22,8 +22,8 @@ Example:
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -r skills/local-video-transcript/requirements.txt
-.venv/bin/python skills/local-video-transcript/scripts/transcribe_video.py \
+.venv/bin/pip install -r .claude/skills/local-video-transcript/requirements.txt
+.venv/bin/python .claude/skills/local-video-transcript/scripts/transcribe_video.py \
   "path/to/video.mp4" --language ru --backend local --model small --vad-filter
 ```
 

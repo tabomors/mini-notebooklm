@@ -2,9 +2,9 @@
 
 This repo contains skills and scripts for generating transcripts and summaries from videos. Outputs live in `transcriptions/`, `comments/` and `summaries/`.
 
-If a user provides a YouTube link or a local video file, use `skills/video-transcript-summary-pipeline/SKILL.md`.
+If a user provides a YouTube link or a local video file, use `.claude/skills/video-transcript-summary-pipeline/SKILL.md`.
 
-For an entire YouTube channel (channel URL or @handle → all videos, cross-video analysis), use `skills/youtube-channel-analyzer/SKILL.md`. Its outputs live in `channels/<channel>/`.
+For an entire YouTube channel (channel URL or @handle → all videos, cross-video analysis), use `.claude/skills/youtube-channel-analyzer/SKILL.md`. Its outputs live in `channels/<channel>/`.
 
 # Tech notes 
 

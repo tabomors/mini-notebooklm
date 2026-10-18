@@ -8,16 +8,16 @@ description: Orchestrate transcript retrieval and summarization for videos. Use 
 ## Workflow
 
 1. Detect the input type.
-   - If the user provides a YouTube link, use `skills/youtube-auto-subs/SKILL.md` to download the transcript.
-   - If the user attaches a local video file, use `skills/local-video-transcript/SKILL.md` to generate the transcript.
+   - If the user provides a YouTube link, use `.claude/skills/youtube-auto-subs/SKILL.md` to download the transcript.
+   - If the user attaches a local video file, use `.claude/skills/local-video-transcript/SKILL.md` to generate the transcript.
 2. If the source was a YouTube link, fetch the top comment threads for the summary's Discussion section (create `.venv` once with `uv venv .venv` if missing; the script is stdlib-only):
 
    ```
-   .venv/bin/python skills/youtube-channel-analyzer/scripts/channel_index.py fetch-comments "URL" --out-dir comments
+   .venv/bin/python .claude/skills/youtube-channel-analyzer/scripts/channel_index.py fetch-comments "URL" --out-dir comments
    ```
 
    Reuse the exact printed `.txt` path. If fetching fails or comments are disabled, continue without a comments file. Local files have no comments step.
-3. After a transcript is obtained, use `skills/video-transcript-summary/SKILL.md` to create the summary, passing the comments file path when one exists.
+3. After a transcript is obtained, use `.claude/skills/video-transcript-summary/SKILL.md` to create the summary, passing the comments file path when one exists.
 
 ## Notes
 
