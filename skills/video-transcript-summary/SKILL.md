@@ -1,6 +1,6 @@
 ---
 name: video-transcript-summary
-description: Create detailed, topic-structured summaries of videos from transcripts with timecodes, ad labeling, verification flags, and strict plain-text formatting. Use when a user asks to summarize a video, especially if they provide a transcript (optionally title/link/duration), and wants a comprehensive summary organized by topics and time intervals.
+description: Create detailed, topic-structured summaries of videos from transcripts with timecodes, ad labeling, verification flags, and strict plain-text formatting. Use when a user asks to summarize a video, especially if they provide a transcript (optionally title/link/duration, plus an optional YouTube comments file for a discussion section), and wants a comprehensive summary organized by topics and time intervals.
 ---
 
 # Video Transcript Summary
@@ -18,7 +18,7 @@ Produce a detailed, chronological summary of a video based on its transcript, fo
 
 ### 1) Intake and language
 
-- Require a full transcript; accept optional title, link, and duration.
+- Require a full transcript; accept optional title, link, and duration; also accept an optional comments file (fetched YouTube comment threads).
 - Detect the transcript language and write the summary in the same language unless the user explicitly requests another language.
 - Translate common terms into the output language while keeping original brand, product, project, and personal names unchanged.
 
@@ -58,6 +58,21 @@ Tags: if needed, add labels such as AD or Needs verification.
 Important numbers and definitions
 • list key figures, metrics, dates, formulas, and briefly explain their meaning.
 
+Discussion in comments
+Present only when a comments file is provided. The file is pre-filtered, but select only the
+3–8 most substantive threads tied to a specific part of the video and discard anything that
+still looks like flood or spam. For each discussion use the template:
+Discussion N: <short title of the question or dispute> [start-time – end-time]
+Question: 1–2 sentences — what viewers ask or dispute; name the top author and like count.
+Course: bullets — the key answers, objections and clarifications in order, each with author
+and likes; include the uploader's replies (marked "channel author" in the comments file).
+Outcome: one line — consensus reached, disagreement remains, uploader answered, or the
+question stayed open.
+Derive the timecode from timestamps written inside the comment text when present, otherwise
+from the transcript content; if a thread is about the video in general, write [whole video]
+and place such discussions last. Write in the summary language; keep names unchanged.
+If the file contains no suitable threads, write one line: No substantive discussion in comments.
+
 Final block
 Main topics in brief:
 • <Topic 1> [timecodes] — one short sentence with the essence
@@ -83,4 +98,5 @@ After producing the summary, save the same content into a separate `.md` file in
 
 - Verify that all major topics and time segments are covered.
 - Ensure every topic block includes timecodes, context, discussion flow, key points, and a conclusion.
+- If a comments file was provided, the Discussion in comments block is present, follows its template, and contains no junk items.
 - Confirm the summary is plain text only with no Markdown symbols such as `#`, `*`, or fenced blocks.

@@ -14,11 +14,12 @@ channels/@handle/
   videos.json      index + per-video processing status (the resume point)
   transcripts/     one cleaned "[HH:MM:SS] text" .txt per video
   summaries/       one .md summary per video (template of skills/video-transcript-summary/SKILL.md)
+  comments/        one plain-text comment-threads .txt per video (fetch-comments)
   analysis.md      cross-video analysis: inter-video narrative + thematic chains + standalone videos
   analysis/        batch digests, only for channels too large to analyze in one pass
 ```
 
-Never write channel outputs into the top-level `transcriptions/` or `summaries/` — those are for single videos.
+Never write channel outputs into the top-level `transcriptions/`, `summaries/` or `comments/` — those are for single videos.
 
 ## Use this skill when
 
@@ -89,26 +90,44 @@ Without `--sub-langs`, yt-dlp takes the default track, which for non-English vid
 
 Always reuse the exact filename yt-dlp printed — never re-derive the stem yourself; the `[id]` suffix makes same-titled videos collision-free.
 
-3. Write the summary **via a subagent** (dispatch one subagent per video, several in parallel — downloads stay sequential, summaries don't need to be). The subagent's task: read `skills/video-transcript-summary/SKILL.md` and follow its template exactly (language = transcript language, `AD` / `Needs verification` flags, chronological chunking for long transcripts), read the transcript file, take title/link from `videos.json`, write the result to `channels/@handle/summaries/<exact stem>.md` — plain text only, no `#`, `*`, or code fences. The subagent returns only a short confirmation plus 3–8 short topic labels in the channel language; it must not paste the whole summary into its reply. Running summaries in subagents keeps the main context small and processes videos concurrently.
-4. Immediately update the manifest yourself — one `mark` per video, never batched (this is what makes interrupting safe). Keep `mark` calls in the main agent: the manifest is a single JSON file with atomic writes, and concurrent writers would race:
+3. Fetch the comment threads for the summary's Discussion section (once per video, before the summary subagent):
 
 ```
-... channel_index.py mark --channel "@handle" --id VIDEO_ID --transcript done --summary done --file "transcripts/<stem>.txt" --file "summaries/<stem>.md" --topics "topic one, topic two"
+... channel_index.py fetch-comments "VIDEO_URL" --out-dir "channels/@handle/comments"
+```
+
+Inside, junk comments are filtered out by a `claude -p --model haiku` call, so the Claude Code login must work. Reuse the exact printed path. If comments are disabled, the command prints "No comments" and writes no file — that is fine. Record it immediately (crash-safe):
+
+```
+... channel_index.py mark --channel "@handle" --id VIDEO_ID --comments done --file "comments/<exact printed stem>.txt"
+```
+
+4. Write the summary **via a subagent** (dispatch one subagent per video, several in parallel — downloads stay sequential, summaries don't need to be). The subagent's task: read `skills/video-transcript-summary/SKILL.md` and follow its template exactly (language = transcript language, `AD` / `Needs verification` flags, chronological chunking for long transcripts), read the transcript file, take title/link from `videos.json`, write the result to `channels/@handle/summaries/<exact stem>.md` — plain text only, no `#`, `*`, or code fences. When `channels/@handle/comments/<exact stem>.txt` exists, pass its path to the subagent too — it feeds the template's Discussion in comments section. The subagent returns only a short confirmation plus 3–8 short topic labels in the channel language; it must not paste the whole summary into its reply. Running summaries in subagents keeps the main context small and processes videos concurrently.
+5. Immediately update the manifest yourself — one `mark` per video, never batched (this is what makes interrupting safe). Keep `mark` calls in the main agent: the manifest is a single JSON file with atomic writes, and concurrent writers would race:
+
+```
+... channel_index.py mark --channel "@handle" --id VIDEO_ID --transcript done --summary done --comments done --file "transcripts/<stem>.txt" --file "summaries/<stem>.md" --file "comments/<stem>.txt" --topics "topic one, topic two"
 ```
 
 Topics are short labels in the channel language; they power the cross-video clustering and later Q&A.
 
-5. On any failure (no auto-subs, members-only, removed video, yt-dlp error), record it and move on:
+6. On any failure (no auto-subs, members-only, removed video, yt-dlp error), record it and move on:
 
 ```
 ... channel_index.py mark --channel "@handle" --id VIDEO_ID --transcript failed --error "<one-line reason>"
+```
+
+If only the comments step failed (yt-dlp 429, Claude CLI not logged in, bad filter JSON), the transcript and summary still proceed — mark it non-blocking and move on:
+
+```
+... channel_index.py mark --channel "@handle" --id VIDEO_ID --comments failed --error "comments: <one-line reason>"
 ```
 
 Never re-download or re-summarize a video already marked `done`. Never skip a `mark`.
 
 ### Phase 2b — Fallbacks when subtitles fail
 
-Subtitle downloads are the most rate-limited part of YouTube. In practice, though, most 429s came from requesting translated tracks (fixed by `--sub-langs` in Phase 2 step 1) — real IP throttling is rare. Handle remaining cases in this order:
+Subtitle downloads are the most rate-limited part of YouTube. In practice, though, most 429s came from requesting translated tracks (fixed by `--sub-langs` in Phase 2 step 1) — real IP throttling is rare. Comment requests (`fetch-comments`) hit the same endpoints: on 429 apply the same backoff/`--sleep-requests 3..5`/sticky-proxy order; since comments never block the summary, you may also `mark --comments failed` and retry on a later pass (`status` keeps listing the video). Handle remaining subtitle cases in this order:
 
 1. **Backoff and retry.** HTTP 429 on subtitles is a temporary IP-level throttle. Wait (2–5 min, longer on repeat), re-run with `--sleep-requests 3..5`. In a normal channel loop the summarization minutes between downloads usually prevent throttling — avoid burst-retrying.
 2. **Proxy with a sticky session.** With `YTDLP_PROXY` set, add `--proxy "$YTDLP_PROXY"` to yt-dlp commands. Per-request IP rotation (default on rotating gateways) looks like session hijacking to YouTube and triggers bot-checks; pin one exit per download instead — for DataImpulse append a session id to the username (`...__sessid.<n>` before the `@`), so one video = one IP and the next video gets a fresh one. Add `--impersonate chrome` and use the `yt-dlp[default,curl-cffi]` build. Note: proxies do not fix 429s caused by requesting translated subtitle tracks — fix that with `--sub-langs` (step 1 above).
@@ -164,7 +183,7 @@ When the user asks about a channel that already has a `channels/@handle/` direct
 
 1. Read `videos.json` first: titles, dates and `topics` give the map of the channel.
 2. Read `analysis.md` for the channel-level picture.
-3. Open specific files in `summaries/` for detail; `grep` in `transcripts/` for exact wording.
+3. Open specific files in `summaries/` for detail; `grep` in `transcripts/` for exact wording; `comments/` holds per-video viewer discussions when you need what the audience asked or concluded.
 4. Cite answers as `Title [id]` plus a timecode when it comes from a transcript.
 
 ## Edge cases and rules

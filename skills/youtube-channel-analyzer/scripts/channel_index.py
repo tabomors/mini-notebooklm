@@ -195,8 +195,8 @@ def default_video(entry: dict) -> dict:
         "duration": entry.get("duration"),
         "view_count": entry.get("view_count"),
         "tabs": entry.get("tabs", []),
-        "status": {"transcript": "pending", "summary": "pending"},
-        "files": {"transcript": None, "summary": None},
+        "status": {"transcript": "pending", "summary": "pending", "comments": "pending"},
+        "files": {"transcript": None, "summary": None, "comments": None},
         "topics": [],
         "error": None,
     }
@@ -270,13 +270,13 @@ def selected_videos(manifest: dict) -> list:
 
 
 def counters(videos: list) -> dict:
-    counts = {
-        "transcript": {"done": 0, "failed": 0, "pending": 0},
-        "summary": {"done": 0, "failed": 0, "pending": 0},
-    }
+    kinds = ("transcript", "summary", "comments")
+    counts = {kind: {"done": 0, "failed": 0, "pending": 0} for kind in kinds}
     for v in videos:
-        for kind in ("transcript", "summary"):
-            state = v["status"].get(kind, "pending")
+        for kind in kinds:
+            state = v["status"].get(kind)
+            if state is None:
+                continue  # kind not tracked (manifests from before comments)
             if state not in STATUS_VALUES:
                 state = "pending"
             counts[kind][state] += 1
@@ -286,12 +286,18 @@ def counters(videos: list) -> dict:
 def progress_line(videos: list) -> str:
     c = counters(videos)
     total = len(videos)
-    return (
+    line = (
         f"Progress: transcripts {c['transcript']['done']}/{total} done, "
         f"{c['transcript']['failed']} failed, {c['transcript']['pending']} pending; "
         f"summaries {c['summary']['done']}/{total} done, "
         f"{c['summary']['failed']} failed, {c['summary']['pending']} pending."
     )
+    if any("comments" in v["status"] for v in videos):
+        line += (
+            f" comments {c['comments']['done']}/{total} done, "
+            f"{c['comments']['failed']} failed, {c['comments']['pending']} pending."
+        )
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +428,12 @@ def cmd_index(args) -> None:
     print(f"Channel: {channel['title'] or '(unknown title)'}")
     print(f"Manifest: {manifest_path}")
     print(f"Videos: {len(videos_out)} ({dated} dated" + (", approximate dates" if approximate else "") + ")")
-    if any(v["status"]["transcript"] != "pending" or v["status"]["summary"] != "pending" for v in videos_out):
+    if any(
+        v["status"]["transcript"] != "pending"
+        or v["status"]["summary"] != "pending"
+        or "comments" in v["status"]
+        for v in videos_out
+    ):
         print(progress_line(videos_out))
 
 
@@ -492,6 +503,8 @@ def cmd_status(args) -> None:
             states.append(f"transcript {v['status'].get('transcript', 'pending')}")
         if v["status"].get("summary") != "done":
             states.append(f"summary {v['status'].get('summary', 'pending')}")
+        if v["status"].get("comments") not in (None, "done"):
+            states.append(f"comments {v['status'].get('comments', 'pending')}")
         if states:
             work.append((pos, v, states))
         if len(work) >= args.pending:
@@ -505,7 +518,11 @@ def cmd_status(args) -> None:
     else:
         print("Nothing pending in the selection.")
 
-    failed = [v for v in videos if "failed" in (v["status"]["transcript"], v["status"]["summary"])]
+    failed = [
+        v
+        for v in videos
+        if "failed" in (v["status"]["transcript"], v["status"]["summary"], v["status"].get("comments"))
+    ]
     if failed:
         print(f"Failed ({len(failed)}):")
         for v in failed:
@@ -531,23 +548,30 @@ def cmd_mark(args) -> None:
         target["status"]["transcript"] = args.transcript
     if args.summary:
         target["status"]["summary"] = args.summary
+    if args.comments:
+        target["status"]["comments"] = args.comments
     for relpath in (args.file or []):
         parts = Path(relpath).parts
         if parts and parts[0] == "transcripts":
             target["files"]["transcript"] = relpath.replace(os.sep, "/")
         elif parts and parts[0] == "summaries":
             target["files"]["summary"] = relpath.replace(os.sep, "/")
+        elif parts and parts[0] == "comments":
+            target["files"]["comments"] = relpath.replace(os.sep, "/")
         else:
-            fail("--file paths must live under transcripts/ or summaries/ of the channel dir.")
+            fail("--file paths must live under transcripts/, summaries/ or comments/ of the channel dir.")
     if args.error is not None:
         target["error"] = args.error or None
-    elif "done" in (args.transcript, args.summary):
+    elif "done" in (args.transcript, args.summary, args.comments):
         target["error"] = None
     if args.topics is not None:
         target["topics"] = [t.strip() for t in args.topics.split(",") if t.strip()]
 
     atomic_write_json(path, manifest)
-    print(f"Marked {args.id}: transcript={target['status']['transcript']}, summary={target['status']['summary']}.")
+    states = f"transcript={target['status']['transcript']}, summary={target['status']['summary']}"
+    if "comments" in target["status"]:
+        states += f", comments={target['status']['comments']}"
+    print(f"Marked {args.id}: {states}.")
     print(progress_line(selected_videos(manifest)))
 
 
@@ -622,6 +646,250 @@ def cmd_clean_vtt(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: fetch-comments
+# ---------------------------------------------------------------------------
+
+FILTER_PROMPT = (
+    "You are pre-filtering junk out of the comment threads of one YouTube video. "
+    "Below, every comment starts with its number in [brackets]; replies are indented. "
+    'Return STRICT JSON only: {"drop": [{"i": <number>, "why": "<2-5 words>"}]} '
+    "listing the comments that are junk. "
+    'Drop: flood (one- or two-word reactions with no content, "first", "+1", '
+    "emoji-only, greetings), advertising and spam, link-only comments, copy-pasted "
+    "duplicates, and content-free provocation or bait. "
+    "Keep: substantive questions, opinions with arguments, facts and corrections, "
+    'relevant personal experiences, and any reply by the channel author (marked '
+    '"channel author") even when short. '
+    "Judge each reply in the context of its thread; do not drop a comment merely "
+    "because you disagree with it; when unsure, keep it. "
+    "No markdown, no commentary - only the JSON object."
+)
+
+
+def comment_date(ts) -> str:
+    if not ts:
+        return "date unknown"
+    try:
+        return datetime.fromtimestamp(int(ts), timezone.utc).strftime("%Y-%m-%d")
+    except (ValueError, OverflowError, OSError):
+        return "date unknown"
+
+
+def normalize_comment_text(text, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + " …"
+    return text
+
+
+def comment_flags(c: dict) -> list:
+    flags = []
+    if c.get("is_pinned"):
+        flags.append("pinned")
+    if c.get("author_is_uploader"):
+        flags.append("channel author")
+    if c.get("is_favorited"):
+        flags.append("hearted")
+    return flags
+
+
+def comment_line(c: dict, indent: str, max_chars: int) -> str:
+    flags = comment_flags(c)
+    flag_part = (", " + ", ".join(flags)) if flags else ""
+    author = c.get("author") or "unknown"
+    likes = c.get("like_count") or 0
+    date = comment_date(c.get("timestamp"))
+    text = normalize_comment_text(c.get("text"), max_chars)
+    return f"{indent}{author} ({date}, {likes} likes{flag_part}): {text}"
+
+
+def group_threads(comments: list) -> tuple:
+    """Group yt-dlp's flat depth-first comment list into threads.
+
+    Returns (threads, orphan_count); orphans are replies whose parent was not
+    in the fetched list (cut off by the caps or incomplete data).
+    """
+    id_to_thread = {}
+    threads: list = []
+    orphans = 0
+    for c in comments:
+        cid = c.get("id")
+        parent = c.get("parent") or "root"
+        if parent == "root":
+            thread = {"top": c, "replies": []}
+            threads.append(thread)
+            if cid:
+                id_to_thread[cid] = thread
+        else:
+            thread = id_to_thread.get(parent)
+            if thread is None:
+                orphans += 1
+            else:
+                thread["replies"].append(c)
+                if cid:
+                    id_to_thread[cid] = thread
+    return threads, orphans
+
+
+def extract_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
+
+
+def run_claude_filter(claude_cmd: str, model: str, draft: str) -> list:
+    """Ask the claude CLI which numbered comments are junk; return its drop verdicts."""
+    prompt = FILTER_PROMPT + "\n\nThreads:\n" + draft
+    cmd = shlex.split(claude_cmd) + ["-p", "--model", model]
+    retries = ("", "\n\nIMPORTANT: Reply with ONLY the raw JSON object, no markdown fences, no other text.")
+    for extra in retries:
+        try:
+            proc = subprocess.run(
+                cmd, input=prompt + extra, capture_output=True, text=True, timeout=300
+            )
+        except subprocess.TimeoutExpired:
+            fail("claude filter timed out after 300 s.", code=4)
+        except FileNotFoundError:
+            fail(
+                f"claude CLI not found ('{claude_cmd}'). "
+                "Install Claude Code and make sure it is logged in.",
+                code=4,
+            )
+        if proc.returncode != 0:
+            tail = "\n".join(proc.stderr.strip().splitlines()[-10:])
+            fail(f"claude filter failed (exit {proc.returncode}):\n{tail}", code=4)
+        try:
+            data = extract_json(proc.stdout)
+            drops = data.get("drop")
+            if isinstance(drops, list):
+                return [d for d in drops if isinstance(d, dict) and isinstance(d.get("i"), int)]
+        except json.JSONDecodeError:
+            pass
+    fail("claude filter did not return valid JSON; refusing to write an unfiltered file.", code=4)
+
+
+def cmd_fetch_comments(args) -> None:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    extra = [
+        "--skip-download",
+        "--write-info-json",
+        "--write-comments",
+        "--extractor-args",
+        (
+            f"youtube:max_comments={args.max_comments},{args.max_parents},"
+            f"{args.max_replies},{args.max_replies_per_thread},{args.max_depth};"
+            f"youtube:comment_sort={args.sort}"
+        ),
+        "--sleep-requests",
+        str(args.sleep_requests),
+        "--paths",
+        str(out_dir),
+        "-o",
+        "%(title)s [%(id)s].%(ext)s",
+    ]
+    proxy = args.proxy or os.environ.get("YTDLP_PROXY")
+    if proxy:
+        extra += ["--proxy", proxy]
+        print(f"Using yt-dlp proxy: {proxy.split('@')[-1]}")
+    before = set(out_dir.glob("*.info.json"))
+    run_yt_dlp(args.yt_dlp, extra + [args.url])
+
+    new_files = sorted(set(out_dir.glob("*.info.json")) - before, key=lambda p: p.stat().st_mtime)
+    if not new_files:
+        fail("yt-dlp wrote no .info.json; cannot locate comments.", code=3)
+    info_path = new_files[-1]
+    try:
+        data = json.loads(info_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fail(f"Corrupted infojson {info_path}: {exc}")
+    if data.get("_type") == "playlist" or not data.get("id"):
+        fail(f"URL does not resolve to a single video ({info_path.name}); fetch-comments needs one video.")
+
+    def cleanup() -> None:
+        if not args.keep_json:
+            info_path.unlink(missing_ok=True)
+
+    comments = data.get("comments")
+    if comments is None:
+        # null = comments disabled (or a live stream); not an error, just no file.
+        cleanup()
+        print("No comments: disabled or unsupported for this video.")
+        return
+    comments = [c for c in comments if isinstance(c, dict) and (c.get("text") or "").strip()]
+    threads, orphans = group_threads(comments)
+
+    # Number every comment (tops and replies) for the AI filter.
+    thread_records = []
+    draft_parts = []
+    idx = 0
+    for thread in threads:
+        idx += 1
+        top_idx = idx
+        draft_parts.append(f"[{top_idx}] " + comment_line(thread["top"], "", args.max_chars))
+        reply_indices = []
+        for reply in thread["replies"]:
+            idx += 1
+            reply_indices.append(idx)
+            draft_parts.append(f"[{idx}] " + comment_line(reply, "  ", args.max_chars))
+        thread_records.append((thread, top_idx, reply_indices))
+    draft = "\n".join(draft_parts)
+
+    if draft:
+        try:
+            drops = run_claude_filter(args.claude, args.filter_model, draft)
+        except BaseException:
+            cleanup()  # do not leave a multi-MB infojson behind on a filter failure
+            raise
+        dropped = {d["i"] for d in drops}
+    else:
+        drops = []
+        dropped = set()
+
+    kept_blocks = []
+    junk_dropped = 0
+    replies_kept = 0
+    for thread, top_idx, reply_indices in thread_records:
+        if top_idx in dropped:
+            junk_dropped += 1 + len(thread["replies"])
+            continue
+        lines = [comment_line(thread["top"], "", args.max_chars)]
+        for reply, reply_idx in zip(thread["replies"], reply_indices):
+            if reply_idx in dropped:
+                junk_dropped += 1
+            else:
+                lines.append(comment_line(reply, "  ", args.max_chars))
+                replies_kept += 1
+        kept_blocks.append("\n".join(lines))
+
+    stem = info_path.name[: -len(".info.json")]
+    out_path = out_dir / (stem + ".txt")
+    header = (
+        f"Comments: {data.get('title') or '?'} [{data.get('id')}] - "
+        f"kept {len(kept_blocks)} of {len(threads)} top comments "
+        f"({junk_dropped} junk dropped by filter, {replies_kept} replies kept, "
+        f"{orphans} orphan replies dropped), sort: {args.sort}"
+    )
+    text = header + "\n"
+    if kept_blocks:
+        text += "\n" + "\n\n".join(kept_blocks) + "\n"
+    out_path.write_text(text, encoding="utf-8")
+    cleanup()
+
+    print(
+        f"Comments: {out_path} ({len(kept_blocks)} threads kept of {len(threads)}, "
+        f"{junk_dropped} junk dropped by filter, {replies_kept} replies)"
+    )
+    if drops:
+        sample = "; ".join(f"[{d['i']}] {d.get('why', 'junk')}" for d in drops[:5])
+        more = f" (+{len(drops) - 5} more)" if len(drops) > 5 else ""
+        print(f"Filter dropped: {sample}{more}")
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -682,13 +950,14 @@ def parse_args() -> argparse.Namespace:
         "--transcript", choices=STATUS_VALUES, help="Transcript status for this video"
     )
     p_mark.add_argument("--summary", choices=STATUS_VALUES, help="Summary status for this video")
+    p_mark.add_argument("--comments", choices=STATUS_VALUES, help="Comments status for this video")
     p_mark.add_argument(
         "--file",
         action="append",
         default=None,
         metavar="RELPATH",
         help="File path relative to the channel dir (repeatable; bucket inferred "
-        "from the leading transcripts/ or summaries/ component)",
+        "from the leading transcripts/, summaries/ or comments/ component)",
     )
     p_mark.add_argument("--error", default=None, help="Error text (for failed); empty string clears it")
     p_mark.add_argument("--topics", default=None, help='Comma-separated topic labels, e.g. "LP pools, hedging"')
@@ -699,6 +968,47 @@ def parse_args() -> argparse.Namespace:
     p_clean.add_argument("--out", default=None, help="Output path (default: same stem without language suffix, .txt)")
     p_clean.add_argument("--delete", action="store_true", help="Delete the .vtt after writing the output")
     p_clean.set_defaults(func=cmd_clean_vtt)
+
+    p_comments = sub.add_parser(
+        "fetch-comments",
+        help="Fetch top comment threads into a plain-text threads file (junk filtered via claude CLI)",
+    )
+    p_comments.add_argument("url", help="Video URL")
+    p_comments.add_argument(
+        "--out-dir", default="comments", help="Directory for the threads .txt (default: comments)"
+    )
+    p_comments.add_argument("--max-comments", type=int, default=600, help="Max comments in total")
+    p_comments.add_argument("--max-parents", type=int, default=100, help="Max top-level comments")
+    p_comments.add_argument("--max-replies", type=int, default=500, help="Max replies in total")
+    p_comments.add_argument(
+        "--max-replies-per-thread", type=int, default=50, help="Max replies per thread"
+    )
+    p_comments.add_argument("--max-depth", type=int, default=2, help="Max thread depth")
+    p_comments.add_argument(
+        "--sort", choices=("top", "new"), default="top", help="Comment sort requested from YouTube"
+    )
+    p_comments.add_argument(
+        "--sleep-requests", type=float, default=1, help="Pass --sleep-requests to yt-dlp"
+    )
+    p_comments.add_argument(
+        "--max-chars", type=int, default=800, help="Truncate each comment text to N chars"
+    )
+    p_comments.add_argument(
+        "--yt-dlp", default="uvx yt-dlp", help='yt-dlp command prefix (default: "uvx yt-dlp")'
+    )
+    p_comments.add_argument(
+        "--claude", default="claude", help='claude CLI command prefix (default: "claude")'
+    )
+    p_comments.add_argument(
+        "--filter-model", default="haiku", help="Model used for junk filtering (default: haiku)"
+    )
+    p_comments.add_argument(
+        "--proxy", default=None, help="Proxy for yt-dlp (overrides YTDLP_PROXY env var)"
+    )
+    p_comments.add_argument(
+        "--keep-json", action="store_true", help="Keep the downloaded .info.json (default: delete it)"
+    )
+    p_comments.set_defaults(func=cmd_fetch_comments)
 
     args = parser.parse_args()
     if getattr(args, "channel", None):
